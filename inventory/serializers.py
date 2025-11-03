@@ -92,7 +92,7 @@ class SaleItemSerializer(serializers.ModelSerializer):
     # NEW: Add computed fields for frontend
     serial_set = serializers.SerializerMethodField()
     datalogger_serial = serializers.SerializerMethodField()
-    import_invoice = serializers.SerializerMethodField()
+    invoice_number = serializers.SerializerMethodField()
     assigned_tool_id = serializers.CharField(required=False, allow_blank=True)
 
     class Meta:
@@ -100,7 +100,7 @@ class SaleItemSerializer(serializers.ModelSerializer):
         fields = [
             'id', 'tool_id', 'equipment', 'cost', 'category', 
             'serial_number', 'serial_set', 'datalogger_serial', 
-            'import_invoice', 'assigned_tool_id'
+            'invoice_number', 'assigned_tool_id'
         ]
         read_only_fields = ['id']
 
@@ -124,10 +124,10 @@ class SaleItemSerializer(serializers.ModelSerializer):
             return obj.tool.datalogger_serial
         return None
 
-    def get_import_invoice(self, obj):
+    def get_invoice_number(self, obj):
         """Get import invoice from sale"""
-        if obj.sale and obj.sale.import_invoice:
-            return obj.sale.import_invoice
+        if obj.sale and obj.sale.invoice_number:
+            return obj.sale.invoice_number
         return None
 
     def create(self, validated_data):
@@ -159,7 +159,6 @@ class SaleSerializer(serializers.ModelSerializer):
             "total_cost",
             "date_sold",
             "invoice_number",
-            "import_invoice",  # NEW: Add import_invoice
             "payment_plan",
             "expiry_date",
             "payment_status",
@@ -171,11 +170,11 @@ class SaleSerializer(serializers.ModelSerializer):
         user = self.context["request"].user
         validated_data["staff"] = user
         
-        # Extract import_invoice from first item if available
+        # Extract invoice_number from first item if available
         if items_data and len(items_data) > 0:
             first_item = items_data[0]
-            if 'import_invoice' in first_item:
-                validated_data['import_invoice'] = first_item.pop('import_invoice')
+            if 'invoice_number' in first_item:
+                validated_data['invoice_number'] = first_item.pop('invoice_number')
         
         # Create the sale
         sale = Sale.objects.create(**validated_data)
@@ -186,7 +185,7 @@ class SaleSerializer(serializers.ModelSerializer):
             serial_set = item_data.pop('serial_set', None)
             datalogger_serial = item_data.pop('datalogger_serial', None)
             assigned_tool_id = item_data.pop('assigned_tool_id', None)
-            import_invoice = item_data.pop('import_invoice', None)
+            invoice_number = item_data.pop('invoice_number', None)
             
             # Handle serial_set - convert to serial_number
             if serial_set and isinstance(serial_set, list):

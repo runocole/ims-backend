@@ -20,6 +20,7 @@ from django.conf import settings
 from rest_framework.decorators import api_view, permission_classes
 from datetime import timedelta
 import secrets, uuid, traceback
+import json
 
 
 User = get_user_model()
@@ -365,6 +366,65 @@ class ToolAssignRandomFromGroupView(APIView):
             is_enabled=True
         )
         
+        # === ADD YOUR COMBO LOGIC HERE ===
+        # Check if this is a combo equipment type
+        if "combo" in tool_name.lower():
+            # For combo, we need to assign both base and rover equipment
+            base_tools = Tool.objects.filter(
+                name__icontains="base only",  # Adjust based on your actual tool names
+                category=category,
+                stock__gt=0,
+                is_enabled=True
+            )
+            rover_tools = Tool.objects.filter(
+                name__icontains="rover only",  # Adjust based on your actual tool names  
+                category=category,
+                stock__gt=0,
+                is_enabled=True
+            )
+            
+            if not base_tools or not rover_tools:
+                return Response(
+                    {"error": "Complete base and rover sets not available for combo."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get base serials (2 serials)
+            base_tool = base_tools.first()
+            base_serial_set = base_tool.get_random_serial_set()
+            if not base_serial_set or len(base_serial_set) != 2:
+                return Response(
+                    {"error": "Failed to get complete base serial set."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            base_tool.decrease_stock()
+            
+            # Get rover serials (2 serials)  
+            rover_tool = rover_tools.first()
+            rover_serial_set = rover_tool.get_random_serial_set()
+            if not rover_serial_set or len(rover_serial_set) != 2:
+                return Response(
+                    {"error": "Failed to get complete rover serial set."},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            rover_tool.decrease_stock()
+            
+            # Combine all serials
+            all_serials = base_serial_set + rover_serial_set
+            
+            return Response({
+                "assigned_tool_id": f"combo_{base_tool.id}_{rover_tool.id}",
+                "tool_name": tool_name,
+                "serial_set": all_serials,  # This should be 4 serials total
+                "serial_count": len(all_serials),
+                "set_type": "Base & Rover Combo",
+                "cost": str(float(base_tool.cost) + float(rover_tool.cost)),
+                "description": "Base & Rover Combo Set",
+                "remaining_stock": min(base_tool.stock, rover_tool.stock),
+                "import_invoice": base_tool.invoice_number  # Use base tool invoice
+            })
+        
+        # === NORMAL LOGIC FOR NON-COMBO EQUIPMENT ===
         # Filter tools that have enough serials for a complete set
         tools_with_enough_serials = []
         for tool in available_tools:
@@ -402,9 +462,10 @@ class ToolAssignRandomFromGroupView(APIView):
             "set_type": selected_tool.description,
             "cost": str(selected_tool.cost),
             "description": selected_tool.description,
-            "remaining_stock": selected_tool.stock
+            "remaining_stock": selected_tool.stock,
+            "import_invoice": selected_tool.invoice_number
         })
-
+    
 # NEW: Get random serial number for a tool
 class ToolGetRandomSerialView(APIView):
     permission_classes = [permissions.IsAuthenticated]
@@ -458,7 +519,8 @@ class ToolSoldSerialsView(APIView):
                     'sale_id': serial_info.get('sale_id'),
                     'customer_name': serial_info.get('customer_name', 'Unknown'),
                     'date_sold': serial_info.get('date_sold'),
-                    'invoice_number': serial_info.get('invoice_number')
+                    'invoice_number': serial_info.get('invoice_number'),
+                    'import_invoice': serial_info.get('import_invoice')  # NEW: Add import_invoice
                 })
             else:
                 # Handle case where serial_info is just a string
@@ -467,7 +529,8 @@ class ToolSoldSerialsView(APIView):
                     'sale_id': None,
                     'customer_name': 'Unknown',
                     'date_sold': None,
-                    'invoice_number': None
+                    'invoice_number': None,
+                    'import_invoice': None  # NEW: Add import_invoice
                 })
                 
         return Response(sold_serials)
@@ -550,7 +613,35 @@ class SaleListCreateView(generics.ListCreateAPIView):
         return Sale.objects.none()
 
     def perform_create(self, serializer):
-        serializer.save(staff=self.request.user)
+        # Get import_invoice from request data
+        import_invoice = self.request.data.get('import_invoice')
+        
+        # Save the sale with staff and import_invoice
+        sale = serializer.save(
+            staff=self.request.user,
+            import_invoice=import_invoice
+        )
+        
+        # FIXED: Also update sale items with serial_set data
+        if sale.items.exists():
+            items_data = self.request.data.get('items', [])
+            for i, item in enumerate(sale.items.all()):
+                if i < len(items_data):
+                    item_data = items_data[i]
+                    # Save serial_set to the item
+                    serial_set = item_data.get('serial_set')
+                    if serial_set:
+                        # Convert serial_set array to serial_number field
+                        if isinstance(serial_set, list) and len(serial_set) > 0:
+                            if len(serial_set) == 1:
+                                item.serial_number = serial_set[0]
+                            else:
+                                item.serial_number = json.dumps(serial_set)
+                        item.save()
+        
+        # Also update sale items with import_invoice if provided
+        if import_invoice and sale.items.exists():
+            sale.items.all().update(import_invoice=import_invoice)
 
 
 class SaleDetailView(generics.RetrieveUpdateDestroyAPIView):
@@ -662,6 +753,7 @@ class DashboardSummaryView(APIView):
                 'cost_sold': sale.total_cost,
                 'payment_status': sale.payment_status,
                 'date_sold': sale.date_sold,
+                'import_invoice': sale.import_invoice  # NEW: Add import_invoice to recent sales
             })
 
         # Expiring receivers - only show items with stock

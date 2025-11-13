@@ -2,6 +2,7 @@ from rest_framework import serializers
 from django.contrib.auth import get_user_model
 from .models import Tool, EquipmentType, Payment, Sale, Customer, Supplier, SaleItem
 from django.utils import timezone
+import json
 
 User = get_user_model()
 
@@ -76,7 +77,7 @@ class ToolSerializer(serializers.ModelSerializer):
 class EquipmentTypeSerializer(serializers.ModelSerializer):
     class Meta:
         model = EquipmentType  
-        fields = ["id", "name", "default_cost", "category", "description", "invoice_number", "created_at"]
+        fields = ["id", "name", "default_cost", "naira_cost", "category", "description", "invoice_number", "created_at"]
 
 
 class SupplierSerializer(serializers.ModelSerializer):
@@ -94,13 +95,14 @@ class SaleItemSerializer(serializers.ModelSerializer):
     datalogger_serial = serializers.SerializerMethodField()
     invoice_number = serializers.SerializerMethodField()
     assigned_tool_id = serializers.CharField(required=False, allow_blank=True)
+    import_invoice = serializers.CharField(required=False, allow_blank=True, allow_null=True)  # NEW: Add import_invoice field
 
     class Meta:
         model = SaleItem
         fields = [
             'id', 'tool_id', 'equipment', 'cost', 'category', 
             'serial_number', 'serial_set', 'datalogger_serial', 
-            'invoice_number', 'assigned_tool_id'
+            'invoice_number', 'assigned_tool_id', 'import_invoice'  # NEW: Added import_invoice
         ]
         read_only_fields = ['id']
 
@@ -145,6 +147,7 @@ class SaleSerializer(serializers.ModelSerializer):
     items = SaleItemSerializer(many=True)
     sold_by = serializers.CharField(source="staff.email", read_only=True)
     date_sold = serializers.DateField(format='%Y-%m-%d')
+    import_invoice = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = Sale
@@ -160,21 +163,50 @@ class SaleSerializer(serializers.ModelSerializer):
             "date_sold",
             "invoice_number",
             "payment_plan",
+            'initial_deposit',
+            'payment_months',
             "expiry_date",
             "payment_status",
+            "import_invoice",
         ]
         read_only_fields = ["staff", "sold_by", "date_sold", "invoice_number", "payment_status"]
+
+    def validate(self, data):
+        """
+        Custom validation for payment plan fields
+        """
+        payment_plan = data.get('payment_plan')
+        initial_deposit = data.get('initial_deposit')
+        payment_months = data.get('payment_months')
+        
+        # If payment plan is "Yes", require installment fields
+        if payment_plan == "Yes":
+            if not initial_deposit:
+                raise serializers.ValidationError({
+                    "initial_deposit": "Initial deposit is required for installment plan."
+                })
+            if not payment_months:
+                raise serializers.ValidationError({
+                    "payment_months": "Payment months are required for installment plan."
+                })
+        # If payment plan is "No", clear installment fields
+        elif payment_plan == "No":
+            data['initial_deposit'] = None
+            data['payment_months'] = None
+        
+        return data
 
     def create(self, validated_data):
         items_data = validated_data.pop('items')
         user = self.context["request"].user
         validated_data["staff"] = user
         
-        # Extract invoice_number from first item if available
-        if items_data and len(items_data) > 0:
-            first_item = items_data[0]
-            if 'invoice_number' in first_item:
-                validated_data['invoice_number'] = first_item.pop('invoice_number')
+        # Extract import_invoice from request data if available
+        request = self.context.get('request')
+        if request and hasattr(request, 'data'):
+            import_invoice = request.data.get('import_invoice')
+            if import_invoice:
+                validated_data['import_invoice'] = import_invoice
         
         # Create the sale
         sale = Sale.objects.create(**validated_data)
@@ -186,6 +218,7 @@ class SaleSerializer(serializers.ModelSerializer):
             datalogger_serial = item_data.pop('datalogger_serial', None)
             assigned_tool_id = item_data.pop('assigned_tool_id', None)
             invoice_number = item_data.pop('invoice_number', None)
+            import_invoice = item_data.pop('import_invoice', None)
             
             # Handle serial_set - convert to serial_number
             if serial_set and isinstance(serial_set, list):
@@ -198,6 +231,10 @@ class SaleSerializer(serializers.ModelSerializer):
             if assigned_tool_id:
                 item_data['assigned_tool_id'] = assigned_tool_id
             
+            # Store import_invoice in sale item
+            if import_invoice:
+                item_data['import_invoice'] = import_invoice
+            
             SaleItem.objects.create(sale=sale, **item_data)
             
         return sale
@@ -205,7 +242,7 @@ class SaleSerializer(serializers.ModelSerializer):
     def update(self, instance, validated_data):
         items_data = validated_data.pop('items', None)
         
-        # Update sale fields
+        # Update sale fields including import_invoice
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
         instance.save()
@@ -218,7 +255,7 @@ class SaleSerializer(serializers.ModelSerializer):
                 SaleItem.objects.create(sale=instance, **item_data)
                 
         return instance
-
+    
 class CustomerSerializer(serializers.ModelSerializer):
     class Meta:
         model = Customer

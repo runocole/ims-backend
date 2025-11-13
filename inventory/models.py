@@ -345,13 +345,19 @@ class Tool(models.Model):
             })
             
         self.save(update_fields=["sold_serials"])
+        
     def get_serial_set_count(self):
         """Return how many serials are in a set for this equipment type"""
-        if "base only" in self.description.lower():
+        if not self.description:
+            return 1
+        
+        description_lower = self.description.lower()
+    
+        if "base only" in description_lower:
             return 2  # Base Only: receiver + datalogger
-        elif "rover only" in self.description.lower():
+        elif "rover only" in description_lower:
             return 2  # Rover Only: receiver + datalogger  
-        elif "combo" in self.description.lower():
+        elif "combo" in description_lower or "base and rover" in description_lower:
             return 4  # Base & Rover Combo: 2 receivers + 2 dataloggers
         else:
             return 1  # Default single item
@@ -376,11 +382,18 @@ class Tool(models.Model):
         if self.sold_serials is None:
             self.sold_serials = []
             
-        self.sold_serials.append({
+        # NEW: Include invoice_number in sold serials info
+        sold_info = {
             'serial_set': serial_set,
             'date_sold': timezone.now().isoformat(),
-            'set_type': self.description  # Store what type of set this was
-        })
+            'set_type': self.description
+        }
+        
+        # Add invoice number if available
+        if self.invoice_number:
+            sold_info['import_invoice'] = self.invoice_number
+            
+        self.sold_serials.append(sold_info)
         
         self.save(update_fields=["available_serials", "sold_serials"])
         return serial_set
@@ -427,6 +440,7 @@ class EquipmentType(models.Model):
     
     name = models.CharField(max_length=100)
     default_cost = models.DecimalField(max_digits=10, decimal_places=2, default=0)
+    naira_cost = models.DecimalField(max_digits=15, decimal_places=2, blank=True, null=True)
     category = models.CharField(max_length=20, choices=CATEGORY_CHOICES, default="Receiver")
     description = models.TextField(blank=True, null=True)
     invoice_number = models.CharField(max_length=100, blank=True, null=True)  # NEW FIELD
@@ -464,7 +478,6 @@ class Supplier(models.Model):
 #----------------------------
 # SALES 
 #----------------------------
-
 class Sale(models.Model):
     PAYMENT_STATUS_CHOICES = (
         ("pending", "Pending"),
@@ -491,9 +504,29 @@ class Sale(models.Model):
     date_sold = models.DateField(default=timezone.now)
     invoice_number = models.CharField(max_length=100, unique=True, blank=True)
     payment_plan = models.CharField(max_length=100, blank=True, null=True)
+    initial_deposit = models.DecimalField(
+        max_digits=10, 
+        decimal_places=2, 
+        blank=True, 
+        null=True,
+        verbose_name="Initial Deposit Amount"
+    )
+    payment_months = models.IntegerField(
+        blank=True, 
+        null=True,
+        verbose_name="Number of Payment Months"
+    )
     expiry_date = models.DateField(blank=True, null=True)
     payment_status = models.CharField(
         max_length=20, choices=PAYMENT_STATUS_CHOICES, default="pending"
+    )
+    
+    # NEW: Add import_invoice field
+    import_invoice = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True, 
+        verbose_name="Import Invoice Number"
     )
 
     def __str__(self):
@@ -503,8 +536,13 @@ class Sale(models.Model):
         """Auto-generate invoice number on creation."""
         if not self.invoice_number:
             self.invoice_number = f"INV-{''.join(random.choices(string.ascii_uppercase + string.digits, k=6))}"
+        
+        # Ensure installment fields are cleared when payment plan is "No"
+        if self.payment_plan == "No":
+            self.initial_deposit = None
+            self.payment_months = None
+            
         super().save(*args, **kwargs)
-
 
 class SaleItem(models.Model):
     """Individual items within a sale"""
@@ -514,7 +552,15 @@ class SaleItem(models.Model):
     cost = models.DecimalField(max_digits=10, decimal_places=2)
     category = models.CharField(max_length=100, blank=True, null=True)
     serial_number = models.CharField(max_length=100, blank=True, null=True)
-    assigned_tool_id = models.CharField(max_length=100, blank=True, null=True)  # NEW: Add assigned_tool_id
+    assigned_tool_id = models.CharField(max_length=100, blank=True, null=True)
+    
+    # NEW: Add import_invoice field to SaleItem
+    import_invoice = models.CharField(
+        max_length=100, 
+        blank=True, 
+        null=True, 
+        verbose_name="Import Invoice Number"
+    )
 
     def __str__(self):
         return f"{self.equipment} - ₦{self.cost}"
@@ -534,6 +580,7 @@ class SaleItem(models.Model):
                 )
                 
         super().save(*args, **kwargs)
+
 # ----------------------------
 #  PAYMENTS
 # ----------------------------

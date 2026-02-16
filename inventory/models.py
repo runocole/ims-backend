@@ -606,3 +606,109 @@ class Payment(models.Model):
 
     def __str__(self):
         return f"Payment {self.id} - {self.customer.email}"
+
+# ----------------------------
+#  ACTIVATION CODES
+# ----------------------------
+
+class CodeBatch(models.Model):
+    """Batch of codes received from China"""
+    batch_number = models.CharField(max_length=100, unique=True)
+    received_date = models.DateField(default=timezone.now)
+    supplier = models.CharField(max_length=200, default="China Supplier")
+    notes = models.TextField(blank=True, null=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    
+    def __str__(self):
+        return f"{self.batch_number} ({self.received_date})"
+
+
+class ActivationCode(models.Model):
+    """Individual activation codes"""
+    DURATION_CHOICES = [
+        ('2weeks', '2 Weeks'),
+        ('1month', '1 Month'),
+        ('3months', '3 Months'),
+        ('unlimited', 'Unlimited'),
+    ]
+    
+    STATUS_CHOICES = [
+        ('available', 'Available'),
+        ('assigned', 'Assigned'),
+        ('activated', 'Activated'),
+        ('expired', 'Expired'),
+    ]
+    
+    # The actual code
+    code = models.CharField(max_length=100, unique=True)
+    
+    # Code properties
+    duration = models.CharField(max_length=20, choices=DURATION_CHOICES)
+    batch = models.ForeignKey(CodeBatch, on_delete=models.SET_NULL, null=True, related_name='codes')
+    
+    # Assignment
+    receiver_serial = models.CharField(max_length=100, blank=True, null=True)  # Serial number of the receiver
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True, blank=True, related_name='codes')
+    sale = models.ForeignKey(Sale, on_delete=models.SET_NULL, null=True, blank=True, related_name='codes')
+    
+    # Status tracking
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='available')
+    is_emergency = models.BooleanField(default=False)  # Emergency vs regular code
+    
+    # Dates
+    assigned_date = models.DateTimeField(null=True, blank=True)
+    activated_date = models.DateTimeField(null=True, blank=True)
+    expiry_date = models.DateTimeField(null=True, blank=True)
+    
+    # Metadata
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    
+    def __str__(self):
+        return f"{self.code} ({self.duration})"
+    
+    def save(self, *args, **kwargs):
+        # Auto-calculate expiry date when assigned
+        if self.assigned_date and self.duration and not self.expiry_date:
+            from datetime import timedelta
+            
+            duration_map = {
+                '2weeks': timedelta(days=14),
+                '1month': timedelta(days=30),
+                '3months': timedelta(days=90),
+                'unlimited': None,
+            }
+            
+            delta = duration_map.get(self.duration)
+            if delta:
+                self.expiry_date = self.assigned_date + delta
+        
+        super().save(*args, **kwargs)
+    
+    @property
+    def is_expired(self):
+        """Check if code is expired"""
+        if not self.expiry_date:
+            return False
+        return timezone.now() > self.expiry_date
+    
+    @property
+    def is_active(self):
+        """Check if code is currently active (assigned and not expired)"""
+        if self.status == 'assigned' and not self.is_expired:
+            return True
+        return False
+
+
+class CodeAssignmentLog(models.Model):
+    """Log of code assignments for audit trail"""
+    code = models.ForeignKey(ActivationCode, on_delete=models.CASCADE, related_name='assignment_logs')
+    receiver_serial = models.CharField(max_length=100)
+    customer = models.ForeignKey(Customer, on_delete=models.SET_NULL, null=True)
+    sale = models.ForeignKey(Sale, on_delete=models.SET_NULL, null=True)
+    assigned_by = models.ForeignKey(User, on_delete=models.SET_NULL, null=True)
+    assigned_date = models.DateTimeField(auto_now_add=True)
+    notes = models.TextField(blank=True, null=True)
+    
+    def __str__(self):
+        return f"Code {self.code.code} → {self.receiver_serial}"

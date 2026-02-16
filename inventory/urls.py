@@ -6,7 +6,8 @@ from .views import (
     PaymentListCreateView, PaymentDetailView,
     DashboardSummaryView, AddCustomerView, CustomerListView, send_sale_email, 
     SupplierListView, SupplierDetailView, equipment_by_invoice,
-    ToolGetRandomSerialView, ToolSoldSerialsView,  ToolGroupedListView, ToolAssignRandomFromGroupView, CustomerOwingDataView
+    ToolGetRandomSerialView, ToolSoldSerialsView,  ToolGroupedListView, ToolAssignRandomFromGroupView, CustomerOwingDataView, ImportCodesView,
+    AssignCodeView, CustomerCodesView, GenerateEmergencyCodeView, AvailableCodesView, ReceiversNeedingCodesView,
 )
 urlpatterns = [
     # --- Auth ---
@@ -49,4 +50,12 @@ urlpatterns = [
 
     # Dashboard
     path('dashboard/summary/', DashboardSummaryView.as_view(), name='dashboard-summary'),
+
+    # Code management URLs
+    path('api/codes/import/', ImportCodesView.as_view(), name='import-codes'),
+    path('api/codes/assign/', AssignCodeView.as_view(), name='assign-code'),
+    path('api/codes/customer/', CustomerCodesView.as_view(), name='customer-codes'),
+    path('api/codes/emergency/', GenerateEmergencyCodeView.as_view(), name='emergency-code'),
+    path('api/codes/available/', AvailableCodesView.as_view(), name='available-codes'),
+    path('api/codes/needing-codes/', ReceiversNeedingCodesView.as_view(), name='needing-codes'),
 ]

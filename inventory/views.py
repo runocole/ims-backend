@@ -1,10 +1,11 @@
-from django.db import models
+from django.db import models, transaction
 from rest_framework import generics, permissions, status
 from django.contrib.auth import get_user_model
-from .models import Tool, Payment, Sale, Customer, EquipmentType, Supplier, SaleItem
+from .models import Tool, Payment, Sale, Customer, EquipmentType, Supplier, SaleItem, CodeBatch, ActivationCode, CodeAssignmentLog 
 from .serializers import (
     UserSerializer, ToolSerializer, EquipmentTypeSerializer,
-    PaymentSerializer, SaleSerializer, CustomerSerializer, SupplierSerializer, CustomerOwingSerializer
+    PaymentSerializer, SaleSerializer, CustomerSerializer, SupplierSerializer, CustomerOwingSerializer,
+    CodeBatchSerializer, ActivationCodeSerializer, CodeAssignmentLogSerializer
 )
 from .permissions import IsAdminOrStaff, IsOwnerOrAdmin
 from rest_framework.permissions import AllowAny
@@ -12,7 +13,7 @@ from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework.response import Response
 from rest_framework.views import APIView
 from django.shortcuts import get_object_or_404
-from django.db.models import Sum, Count, Max
+from django.db.models import Sum, Count, Max, Q
 from django.core.mail import send_mail, BadHeaderError
 from django.utils import timezone
 from rest_framework.exceptions import PermissionDenied
@@ -21,7 +22,8 @@ from rest_framework.decorators import api_view, permission_classes
 from datetime import timedelta
 import secrets, uuid, traceback
 import json
-
+import pandas as pd
+from io import BytesIO
 
 User = get_user_model()
 
@@ -806,3 +808,454 @@ class PaymentDetailView(generics.RetrieveUpdateDestroyAPIView):
     queryset = Payment.objects.all()
     serializer_class = PaymentSerializer
     permission_classes = [IsOwnerOrAdmin]
+
+# ----------------------------
+#  CODE MANAGEMENT VIEWS
+# ----------------------------
+
+import pandas as pd
+from io import BytesIO
+from django.db import transaction
+
+# 1. IMPORT CODES FROM EXCEL
+class ImportCodesView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+    
+    def post(self, request):
+        try:
+            excel_file = request.FILES.get('excel_file')
+            batch_number = request.data.get('batch_number', f'CHINA-{timezone.now().strftime("%Y%m%d")}')
+            supplier = request.data.get('supplier', 'China Supplier')
+            
+            if not excel_file:
+                return Response(
+                    {"error": "Excel file is required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Read Excel file
+            df = pd.read_excel(excel_file)
+            
+            # Expected columns: code, duration, serial_number (optional)
+            required_columns = ['code', 'duration']
+            missing_columns = [col for col in required_columns if col not in df.columns]
+            
+            if missing_columns:
+                return Response(
+                    {"error": f"Missing columns: {', '.join(missing_columns)}"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Create batch
+            batch = CodeBatch.objects.create(
+                batch_number=batch_number,
+                supplier=supplier,
+                notes=f"Imported {len(df)} codes from Excel"
+            )
+            
+            # Import codes
+            imported_count = 0
+            assigned_count = 0
+            
+            for _, row in df.iterrows():
+                code = str(row['code']).strip()
+                duration = str(row['duration']).strip().lower()
+                serial_number = str(row.get('serial_number', '')).strip() if pd.notna(row.get('serial_number')) else None
+                
+                # Map duration to valid choices
+                duration_map = {
+                    '2 weeks': '2weeks',
+                    '1 month': '1month',
+                    '3 months': '3months',
+                    'unlimited': 'unlimited',
+                    '2weeks': '2weeks',
+                    '1month': '1month',
+                    '3months': '3months',
+                }
+                
+                duration = duration_map.get(duration, '3months')  # Default to 3months
+                
+                # Create code
+                activation_code = ActivationCode.objects.create(
+                    code=code,
+                    duration=duration,
+                    batch=batch,
+                    receiver_serial=serial_number if serial_number else None
+                )
+                
+                imported_count += 1
+                
+                # Auto-assign if serial number provided and matches a sold receiver
+                if serial_number:
+                    try:
+                        # Find sale item with this serial number
+                        sale_item = SaleItem.objects.filter(
+                            serial_number__icontains=serial_number
+                        ).first()
+                        
+                        if sale_item:
+                            # Get the sale and customer
+                            sale = sale_item.sale
+                            
+                            # Find customer
+                            customer = Customer.objects.filter(
+                                Q(name__iexact=sale.name) | 
+                                Q(phone__iexact=sale.phone)
+                            ).first()
+                            
+                            if customer:
+                                # Assign code
+                                activation_code.receiver_serial = serial_number
+                                activation_code.customer = customer
+                                activation_code.sale = sale
+                                activation_code.status = 'assigned'
+                                activation_code.assigned_date = timezone.now()
+                                activation_code.save()
+                                
+                                # Log assignment
+                                CodeAssignmentLog.objects.create(
+                                    code=activation_code,
+                                    receiver_serial=serial_number,
+                                    customer=customer,
+                                    sale=sale,
+                                    assigned_by=request.user,
+                                    notes="Auto-assigned during import"
+                                )
+                                
+                                assigned_count += 1
+                    except Exception as e:
+                        print(f"Error auto-assigning code {code}: {str(e)}")
+                        continue
+            
+            return Response({
+                "success": True,
+                "message": f"Imported {imported_count} codes. Auto-assigned {assigned_count} codes.",
+                "batch_id": batch.id,
+                "batch_number": batch.batch_number
+            })
+            
+        except Exception as e:
+            return Response(
+                {"error": f"Import failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# 2. ASSIGN CODE TO RECEIVER
+class AssignCodeView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+    
+    def post(self, request):
+        try:
+            receiver_serial = request.data.get('receiver_serial')
+            code_id = request.data.get('code_id')
+            customer_id = request.data.get('customer_id')
+            sale_id = request.data.get('sale_id')
+            
+            if not receiver_serial or not code_id:
+                return Response(
+                    {"error": "Receiver serial and code ID are required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Get code
+            code = ActivationCode.objects.get(id=code_id, status='available')
+            
+            # Get customer and sale
+            customer = None
+            sale = None
+            
+            if customer_id:
+                customer = Customer.objects.get(id=customer_id)
+            
+            if sale_id:
+                sale = Sale.objects.get(id=sale_id)
+            
+            # Find customer from serial if not provided
+            if not customer:
+                # Try to find sale item with this serial
+                sale_item = SaleItem.objects.filter(
+                    serial_number__icontains=receiver_serial
+                ).first()
+                
+                if sale_item and sale_item.sale:
+                    sale = sale_item.sale
+                    customer = Customer.objects.filter(
+                        Q(name__iexact=sale.name) | 
+                        Q(phone__iexact=sale.phone)
+                    ).first()
+            
+            # Assign code
+            code.receiver_serial = receiver_serial
+            code.customer = customer
+            code.sale = sale
+            code.status = 'assigned'
+            code.assigned_date = timezone.now()
+            code.save()
+            
+            # Log assignment
+            CodeAssignmentLog.objects.create(
+                code=code,
+                receiver_serial=receiver_serial,
+                customer=customer,
+                sale=sale,
+                assigned_by=request.user
+            )
+            
+            return Response({
+                "success": True,
+                "message": f"Code {code.code} assigned to receiver {receiver_serial}",
+                "code": ActivationCodeSerializer(code).data
+            })
+            
+        except ActivationCode.DoesNotExist:
+            return Response(
+                {"error": "Code not found or not available"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": f"Assignment failed: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# 3. GET CUSTOMER CODES
+class CustomerCodesView(APIView):
+    permission_classes = [permissions.IsAuthenticated]
+    
+    def get(self, request):
+        try:
+            user = request.user
+            receiver_serial = request.query_params.get('receiver_serial')
+            
+            if user.role == 'customer':
+                # Get customer's codes
+                customer = Customer.objects.get(user=user)
+                codes = ActivationCode.objects.filter(
+                    customer=customer,
+                    status='assigned'
+                ).order_by('-assigned_date')
+                
+                # Filter by serial if provided
+                if receiver_serial:
+                    codes = codes.filter(receiver_serial__icontains=receiver_serial)
+                
+                # Check payment status for each receiver
+                result = []
+                for code in codes:
+                    # Get payment info for this receiver
+                    last_payment = Payment.objects.filter(
+                        customer=user,
+                        sale=code.sale
+                    ).order_by('-payment_date').first()
+                    
+                    months_since_payment = None
+                    if last_payment:
+                        months_since_payment = (timezone.now() - last_payment.payment_date).days // 30
+                    
+                    # Check eligibility
+                    eligible_for_regular = months_since_payment is not None and months_since_payment <= 4
+                    
+                    result.append({
+                        **ActivationCodeSerializer(code).data,
+                        'eligible_for_regular': eligible_for_regular,
+                        'months_since_last_payment': months_since_payment,
+                        'requires_payment': not eligible_for_regular and code.is_emergency,
+                        'can_request_emergency': not eligible_for_regular
+                    })
+                
+                return Response(result)
+            
+            elif user.role in ['admin', 'staff']:
+                # Admin can query any customer
+                customer_id = request.query_params.get('customer_id')
+                receiver_serial = request.query_params.get('receiver_serial')
+                
+                if customer_id:
+                    customer = Customer.objects.get(id=customer_id)
+                    codes = ActivationCode.objects.filter(customer=customer)
+                elif receiver_serial:
+                    codes = ActivationCode.objects.filter(receiver_serial__icontains=receiver_serial)
+                else:
+                    return Response(
+                        {"error": "Provide customer_id or receiver_serial for admin query"},
+                        status=status.HTTP_400_BAD_REQUEST
+                    )
+                
+                return Response(ActivationCodeSerializer(codes, many=True).data)
+            
+            return Response([])
+            
+        except Customer.DoesNotExist:
+            return Response(
+                {"error": "Customer not found"},
+                status=status.HTTP_404_NOT_FOUND
+            )
+        except Exception as e:
+            return Response(
+                {"error": str(e)},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# 4. GENERATE EMERGENCY CODE
+class GenerateEmergencyCodeView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+    
+    def post(self, request):
+        try:
+            receiver_serial = request.data.get('receiver_serial')
+            customer_id = request.data.get('customer_id')
+            
+            if not receiver_serial:
+                return Response(
+                    {"error": "Receiver serial is required"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # Find available 2-week code
+            emergency_code = ActivationCode.objects.filter(
+                duration='2weeks',
+                status='available',
+                is_emergency=True
+            ).first()
+            
+            if not emergency_code:
+                return Response(
+                    {"error": "No emergency codes available"},
+                    status=status.HTTP_404_NOT_FOUND
+                )
+            
+            # Get customer
+            customer = None
+            if customer_id:
+                customer = Customer.objects.get(id=customer_id)
+            else:
+                # Try to find customer from serial
+                sale_item = SaleItem.objects.filter(
+                    serial_number__icontains=receiver_serial
+                ).first()
+                
+                if sale_item and sale_item.sale:
+                    sale = sale_item.sale
+                    customer = Customer.objects.filter(
+                        Q(name__iexact=sale.name) | 
+                        Q(phone__iexact=sale.phone)
+                    ).first()
+            
+            # Assign emergency code
+            emergency_code.receiver_serial = receiver_serial
+            emergency_code.customer = customer
+            emergency_code.status = 'assigned'
+            emergency_code.assigned_date = timezone.now()
+            emergency_code.save()
+            
+            # Log assignment
+            CodeAssignmentLog.objects.create(
+                code=emergency_code,
+                receiver_serial=receiver_serial,
+                customer=customer,
+                assigned_by=request.user,
+                notes="Emergency code generated"
+            )
+            
+            return Response({
+                "success": True,
+                "message": f"Emergency 2-week code generated for {receiver_serial}",
+                "code": emergency_code.code,
+                "expiry_date": emergency_code.expiry_date
+            })
+            
+        except Exception as e:
+            return Response(
+                {"error": f"Failed to generate emergency code: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+# 5. AVAILABLE CODES VIEW (for admin)
+class AvailableCodesView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+    
+    def get(self, request):
+        duration = request.query_params.get('duration')
+        
+        codes = ActivationCode.objects.filter(status='available')
+        
+        if duration:
+            codes = codes.filter(duration=duration)
+        
+        # Count by duration
+        counts = codes.values('duration').annotate(count=Count('id'))
+        
+        return Response({
+            'codes': ActivationCodeSerializer(codes, many=True).data,
+            'counts': list(counts),
+            'total_available': codes.count()
+        })
+
+
+# 6. RECEIVERS NEEDING CODES
+class ReceiversNeedingCodesView(APIView):
+    permission_classes = [permissions.IsAuthenticated, IsAdminOrStaff]
+    
+    def get(self, request):
+        # Find receivers sold but without codes or with expired codes
+        receivers_needing_codes = []
+        
+        # Get all sale items that are receivers
+        receiver_sales = SaleItem.objects.filter(
+            tool__category='Receiver'
+        ).select_related('sale', 'tool')
+        
+        for sale_item in receiver_sales:
+            # Get serial number(s)
+            serials = []
+            if sale_item.serial_number:
+                # Check if it's a JSON array or single serial
+                try:
+                    serials_data = json.loads(sale_item.serial_number)
+                    if isinstance(serials_data, list):
+                        serials = serials_data
+                    else:
+                        serials = [serials_data]
+                except:
+                    serials = [sale_item.serial_number]
+            
+            # Check each serial
+            for serial in serials:
+                # Check if code exists for this serial
+                code_exists = ActivationCode.objects.filter(
+                    receiver_serial=serial,
+                    status='assigned'
+                ).exists()
+                
+                # Check if existing code is expired
+                expired_code = ActivationCode.objects.filter(
+                    receiver_serial=serial,
+                    status='assigned'
+                ).first()
+                
+                is_expired = expired_code and expired_code.is_expired if expired_code else False
+                
+                if not code_exists or is_expired:
+                    # Find customer
+                    customer = Customer.objects.filter(
+                        Q(name__iexact=sale_item.sale.name) | 
+                        Q(phone__iexact=sale_item.sale.phone)
+                    ).first()
+                    
+                    receivers_needing_codes.append({
+                        'serial': serial,
+                        'customer_id': customer.id if customer else None,
+                        'customer_name': customer.name if customer else sale_item.sale.name,
+                        'sale_id': sale_item.sale.id,
+                        'sale_invoice': sale_item.sale.invoice_number,
+                        'last_payment_date': customer.date_last_paid if customer else None,
+                        'needs_urgent': is_expired,  # Expired = urgent
+                        'has_code': code_exists,
+                        'code_expired': is_expired
+                    })
+        
+        return Response(receivers_needing_codes)

@@ -1,6 +1,6 @@
 from rest_framework import serializers
 from django.contrib.auth import get_user_model
-from .models import Tool, EquipmentType, Payment, Sale, Customer, Supplier, SaleItem
+from .models import CodeAssignmentLog, Tool, EquipmentType, Payment, Sale, Customer, Supplier, SaleItem, CodeBatch, ActivationCode
 from django.utils import timezone
 import json
 
@@ -320,3 +320,31 @@ class PaymentSerializer(serializers.ModelSerializer):
             sale.save()
 
         return payment
+
+class CodeBatchSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = CodeBatch
+        fields = '__all__'
+
+
+class ActivationCodeSerializer(serializers.ModelSerializer):
+    batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    is_expired = serializers.BooleanField(read_only=True)
+    is_active = serializers.BooleanField(read_only=True)
+    
+    class Meta:
+        model = ActivationCode
+        fields = '__all__'
+        read_only_fields = ['created_at', 'updated_at']
+
+
+
+class CodeAssignmentLogSerializer(serializers.ModelSerializer):
+    code_str = serializers.CharField(source='code.code', read_only=True)
+    assigned_by_email = serializers.CharField(source='assigned_by.email', read_only=True)
+    customer_name = serializers.CharField(source='customer.name', read_only=True)
+    
+    class Meta:
+        model = CodeAssignmentLog
+        fields = '__all__'

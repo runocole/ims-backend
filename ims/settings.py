@@ -11,6 +11,9 @@ https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 
 from pathlib import Path
+from datetime import timedelta
+from django.db.backends.signals import connection_created
+from django.dispatch import receiver
 
 # Build paths inside the project like this: BASE_DIR / 'subdir'.
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -25,11 +28,10 @@ SECRET_KEY = 'django-insecure-2$mt_=%bnl6p2f7fd+n0!t%j*q9k6spaw&qn&qw+ywxis2qwpz
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = True
 
-ALLOWED_HOSTS = []
+ALLOWED_HOSTS = ['localhost', '127.0.0.1']
 
 
 # Application definition
-
 INSTALLED_APPS = [
     'django.contrib.admin',
     'django.contrib.auth',
@@ -40,9 +42,11 @@ INSTALLED_APPS = [
     'rest_framework',
     'inventory',
     'django_extensions',
+    'corsheaders',  # corsheaders added here (only once)
 ]
 
 MIDDLEWARE = [
+    'corsheaders.middleware.CorsMiddleware',  # This should be at the top
     'django.middleware.security.SecurityMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
     'django.middleware.common.CommonMiddleware',
@@ -139,7 +143,6 @@ REST_FRAMEWORK = {
     ),
 }
 
-from datetime import timedelta
 SIMPLE_JWT = {
     'ACCESS_TOKEN_LIFETIME': timedelta(minutes=60),
     'REFRESH_TOKEN_LIFETIME': timedelta(days=1),
@@ -152,10 +155,8 @@ STATIC_ROOT = BASE_DIR / 'staticfiles'
 MEDIA_URL = '/media/'
 MEDIA_ROOT = BASE_DIR / 'media'
 
-# CORS (for IoT/Frontend API access)
-INSTALLED_APPS += ['corsheaders']
-MIDDLEWARE = ['corsheaders.middleware.CorsMiddleware'] + MIDDLEWARE
-CORS_ALLOW_ALL_ORIGINS = True  # For development; restrict in production
+# CORS settings (for IoT/Frontend API access)
+CORS_ALLOW_ALL_ORIGINS = True  # For development only
 
 # For production using Gmail SMTP:
 EMAIL_BACKEND = 'django.core.mail.backends.smtp.EmailBackend'
@@ -165,9 +166,6 @@ EMAIL_USE_TLS = True
 EMAIL_HOST_USER = 'runocole@gmail.com'
 EMAIL_HOST_PASSWORD = 'yocg yqgi mrna nnrx'
 DEFAULT_FROM_EMAIL = 'runocole@gmail.com'
-
-from django.db.backends.signals import connection_created
-from django.dispatch import receiver
 
 @receiver(connection_created)
 def disable_foreign_keys(sender, connection, **kwargs):

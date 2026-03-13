@@ -239,7 +239,6 @@ class Tool(models.Model):
     cost = models.DecimalField(max_digits=10, decimal_places=2)
     stock = models.PositiveIntegerField(default=1)
 
-    # 🔹 Dynamic ForeignKey to Supplier (instead of hardcoded choices)
     supplier = models.ForeignKey(
         "Supplier",
         on_delete=models.SET_NULL,
@@ -248,7 +247,6 @@ class Tool(models.Model):
         related_name="tools",
     )
 
-    # 🔹 UPDATED: Change from ReceiverType to EquipmentType
     equipment_type = models.ForeignKey(
         "EquipmentType",
         on_delete=models.SET_NULL,
@@ -261,166 +259,127 @@ class Tool(models.Model):
     is_enabled = models.BooleanField(default=True)
     invoice_number = models.CharField(max_length=50, blank=True, null=True)
     date_added = models.DateTimeField(auto_now_add=True)
-    
-    # NEW: Expiry date field
     expiry_date = models.DateField(null=True, blank=True, verbose_name="Expiry Date")
 
-    # Optional: to store multiple serials if needed
+    # JSON Storage for Serials
     serials = models.JSONField(default=list, blank=True)
-    
-    # NEW: Serial number tracking fields
-    available_serials = models.JSONField(default=list, blank=True)  # Available serial numbers
-    sold_serials = models.JSONField(default=list, blank=True)       # Sold serial numbers with sale info
+    available_serials = models.JSONField(default=list, blank=True)
+    pending_serials = models.JSONField(default=list, blank=True)  # Reserved during selection
+    sold_serials = models.JSONField(default=list, blank=True)     # Finalized sales
 
     def __str__(self):
         return f"{self.name} ({self.code})"
 
-    # --- Utility Methods ---
+    # --- STOCK MANAGEMENT ---
+
     def decrease_stock(self):
-        """Reduce stock by 1 and save."""
+        """Reduces stock count manually if needed."""
         if self.stock > 0:
             self.stock -= 1
             self.save(update_fields=["stock"])
 
     def increase_stock(self):
-        """Increase stock by 1 and save."""
+        """Increases stock count manually if needed."""
         self.stock += 1
         self.save(update_fields=["stock"])
-        
-    def get_random_serial(self):
-        """Get a random serial number from available_serials"""
-        if not self.available_serials or len(self.available_serials) == 0:
-            return None
-            
-        import random
-        random_serial = random.choice(self.available_serials) 
-        
-        # Remove from available and add to sold
-        self.available_serials.remove(random_serial)
-        
-        # Initialize sold_serials if None
-        if self.sold_serials is None:
-            self.sold_serials = []
-            
-        # Add to sold serials with basic info
-        self.sold_serials.append({
-            'serial': random_serial,
-            'date_sold': timezone.now().isoformat()
-        })
-        
-        self.save(update_fields=["available_serials", "sold_serials"])
-        return random_serial
-        
-    def add_sold_serial_info(self, serial, sale_id, customer_name, invoice_number=None):
-        """Add sale information to a sold serial"""
-        if not self.sold_serials:
-            self.sold_serials = []
-            
-        # Find the serial and add sale info
-        for i, sold_serial in enumerate(self.sold_serials):
-            if isinstance(sold_serial, dict) and sold_serial.get('serial') == serial:
-                self.sold_serials[i]['sale_id'] = sale_id
-                self.sold_serials[i]['customer_name'] = customer_name
-                self.sold_serials[i]['date_sold'] = date.today().isoformat()
-                self.sold_serials[i]['invoice_number'] = invoice_number
-                break
-            elif sold_serial == serial:
-                # Convert string to dict with sale info
-                self.sold_serials[i] = {
-                    'serial': serial,
-                    'sale_id': sale_id,
-                    'customer_name': customer_name,
-                    'date_sold': date.today().isoformat(),
-                    'invoice_number': invoice_number
-                }
-                break
-        else:
-            # Serial not found in sold_serials, add new entry
-            self.sold_serials.append({
-                'serial': serial,
-                'sale_id': sale_id,
-                'customer_name': customer_name,
-                'date_sold': date.today().isoformat(),
-                'invoice_number': invoice_number
-            })
-            
-        self.save(update_fields=["sold_serials"])
-        
+
+    # --- SERIAL ASSIGNMENT LOGIC ---
+
     def get_serial_set_count(self):
-        """Return how many serials are in a set for this equipment type"""
+        """Calculates how many serials are needed based on description."""
         if not self.description:
             return 1
         
-        description_lower = self.description.lower()
-    
-        if "base only" in description_lower:
-            return 2  # Base Only: receiver + datalogger
-        elif "rover only" in description_lower:
-            return 2  # Rover Only: receiver + datalogger  
-        elif "combo" in description_lower or "base and rover" in description_lower:
-            return 4  # Base & Rover Combo: 2 receivers + 2 dataloggers
-        else:
-            return 1  # Default single item
-    
+        desc = self.description.lower()
+        if "base only" in desc or "rover only" in desc:
+            return 2  # receiver + datalogger
+        elif "combo" in desc or "base and rover" in desc:
+            return 4  # 2 receivers + 2 dataloggers
+        return 1
+
     def get_random_serial_set(self):
-        """Get a complete set of serial numbers based on equipment type"""
-        if not self.available_serials:
-            return None
-            
+        """
+        Logic for the 'Assign' button. 
+        Moves serials to PENDING and decreases stock immediately.
+        """
         set_count = self.get_serial_set_count()
         
-        if len(self.available_serials) < set_count:
+        if not self.available_serials or len(self.available_serials) < set_count:
             return None
             
-        # Take the first 'set_count' serials as a set
+        # 1. Grab the next available set
         serial_set = self.available_serials[:set_count]
         
-        # Remove from available
+        # 2. Remove from available
         self.available_serials = self.available_serials[set_count:]
         
-        # Add to sold serials
-        if self.sold_serials is None:
-            self.sold_serials = []
-            
-        # NEW: Include invoice_number in sold serials info
+        # 3. Add to pending (so fast loops don't grab them again)
+        pending_entry = {
+            'serial_set': serial_set,
+            'reserved_at': timezone.now().isoformat(),
+            'import_invoice': self.invoice_number
+        }
+        self.pending_serials.append(pending_entry)
+        
+        # 4. Auto-decrease stock
+        if self.stock > 0:
+            self.stock -= 1
+
+        self.save(update_fields=["available_serials", "pending_serials", "stock"])
+        return serial_set
+
+    def restore_serials(self, serial_set):
+        """
+        Call this if a user removes an item from the sale table 
+        WITHOUT finishing the sale. Puts serials back and restores stock.
+        """
+        # Remove from pending list
+        self.pending_serials = [p for p in self.pending_serials if p.get('serial_set') != serial_set]
+        
+        # Put back in available
+        self.available_serials.extend(serial_set)
+        
+        # Restore stock count
+        self.stock += 1
+        
+        self.save(update_fields=["available_serials", "pending_serials", "stock"])
+
+    def finalize_sale_serials(self, serial_set, sale_id, customer_name):
+        """
+        Call this when 'Save Sale' is clicked. 
+        Moves serials from PENDING to SOLD permanently.
+        """
+        # 1. Remove from pending
+        self.pending_serials = [p for p in self.pending_serials if p.get('serial_set') != serial_set]
+
+        # 2. Add to sold with details
         sold_info = {
             'serial_set': serial_set,
-            'date_sold': timezone.now().isoformat(),
-            'set_type': self.description
+            'sale_id': str(sale_id),
+            'customer': customer_name,
+            'date_sold': timezone.now().date().isoformat(),
+            'import_invoice': self.invoice_number
         }
-        
-        # Add invoice number if available
-        if self.invoice_number:
-            sold_info['import_invoice'] = self.invoice_number
-            
         self.sold_serials.append(sold_info)
         
-        self.save(update_fields=["available_serials", "sold_serials"])
-        return serial_set
-    
+        self.save(update_fields=["pending_serials", "sold_serials"])
+
+    # --- PROPERTIES ---
+
     @property
     def display_equipment_type(self):
-        """Display equipment type if available"""
-        if self.equipment_type:
-            return self.equipment_type.name
-        return "N/A"
+        return self.equipment_type.name if self.equipment_type else "N/A"
 
     @property
     def is_expired(self):
-        """Check if the tool is expired"""
-        if self.expiry_date:
-            from django.utils import timezone
-            return self.expiry_date < timezone.now().date()
-        return False
+        return self.expiry_date < timezone.now().date() if self.expiry_date else False
 
     @property
     def expires_soon(self):
-        """Check if the tool expires within 30 days"""
         if self.expiry_date:
-            from django.utils import timezone
             from datetime import timedelta
-            thirty_days_from_now = timezone.now().date() + timedelta(days=30)
-            return timezone.now().date() < self.expiry_date <= thirty_days_from_now
+            thirty_days = timezone.now().date() + timedelta(days=30)
+            return timezone.now().date() < self.expiry_date <= thirty_days
         return False
 
 # ----------------------------
@@ -481,6 +440,7 @@ class Supplier(models.Model):
 class Sale(models.Model):
     PAYMENT_STATUS_CHOICES = (
         ("pending", "Pending"),
+        ('ongoing', 'Ongoing'),
         ("completed", "Completed"),
         ("installment", "Installment"),
         ("failed", "Failed"),
@@ -562,6 +522,21 @@ class SaleItem(models.Model):
         verbose_name="Import Invoice Number"
     )
 
+    equipment_type = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        verbose_name="Equipment Type",
+        help_text="Base Only, Rover Only, Base & Rover Combo, etc."
+    )
+
+    external_radio_serial = models.CharField(
+        max_length=100,
+        blank=True,
+        null=True,
+        verbose_name="External Radio Serial"
+    )
+
     def __str__(self):
         return f"{self.equipment} - ₦{self.cost}"
 
@@ -621,16 +596,33 @@ class CodeBatch(models.Model):
     
     def __str__(self):
         return f"{self.batch_number} ({self.received_date})"
+    
+class BatchSerial(models.Model):
+    """
+    Stores individual receiver serials imported from a CSV into a CodeBatch.
+
+    status values (match your CSV exactly):
+        'not sold'  → In Stock tab
+        'active'    → Sold tab (assigned to a customer)
+    """
+    batch          = models.ForeignKey(CodeBatch, on_delete=models.CASCADE, related_name='serials')
+    serial_number  = models.CharField(max_length=100)
+    status         = models.CharField(max_length=50, default='not sold')
+    payment_status = models.CharField(max_length=50, default='not_applicable')
+    customer_email = models.EmailField(blank=True, null=True)
+    customer_name  = models.CharField(max_length=255, blank=True, null=True)
+    assigned_date  = models.DateField(blank=True, null=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ('batch', 'serial_number')
+        ordering = ['serial_number']
+
+    def __str__(self):
+        return f"{self.serial_number} ({self.batch.batch_number}) — {self.status}"
 
 
 class ActivationCode(models.Model):
-    """Individual activation codes"""
-    DURATION_CHOICES = [
-        ('2weeks', '2 Weeks'),
-        ('1month', '1 Month'),
-        ('3months', '3 Months'),
-        ('unlimited', 'Unlimited'),
-    ]
     
     STATUS_CHOICES = [
         ('available', 'Available'),
@@ -643,7 +635,6 @@ class ActivationCode(models.Model):
     code = models.CharField(max_length=100, unique=True)
     
     # Code properties
-    duration = models.CharField(max_length=20, choices=DURATION_CHOICES)
     batch = models.ForeignKey(CodeBatch, on_delete=models.SET_NULL, null=True, related_name='codes')
     
     # Assignment
@@ -658,39 +649,25 @@ class ActivationCode(models.Model):
     # Dates
     assigned_date = models.DateTimeField(null=True, blank=True)
     activated_date = models.DateTimeField(null=True, blank=True)
-    expiry_date = models.DateTimeField(null=True, blank=True)
+    expiry_date = models.DateTimeField(null=True, blank=True)  # Can still set this manually
     
     # Metadata
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
+
+    #QR code image field 
+    qr_code_image = models.TextField(null=True, blank=True, help_text="Base64 encoded QR code image")
     
     def __str__(self):
-        return f"{self.code} ({self.duration})"
-    
-    def save(self, *args, **kwargs):
-        # Auto-calculate expiry date when assigned
-        if self.assigned_date and self.duration and not self.expiry_date:
-            from datetime import timedelta
-            
-            duration_map = {
-                '2weeks': timedelta(days=14),
-                '1month': timedelta(days=30),
-                '3months': timedelta(days=90),
-                'unlimited': None,
-            }
-            
-            delta = duration_map.get(self.duration)
-            if delta:
-                self.expiry_date = self.assigned_date + delta
-        
-        super().save(*args, **kwargs)
+        return f"{self.code} - {self.get_status_display()}"
     
     @property
     def is_expired(self):
         """Check if code is expired"""
-        if not self.expiry_date:
-            return False
-        return timezone.now() > self.expiry_date
+        if self.expiry_date:
+            from django.utils import timezone
+            return timezone.now() > self.expiry_date
+        return False
     
     @property
     def is_active(self):

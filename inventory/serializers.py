@@ -96,13 +96,17 @@ class SaleItemSerializer(serializers.ModelSerializer):
     invoice_number = serializers.SerializerMethodField()
     assigned_tool_id = serializers.CharField(required=False, allow_blank=True)
     import_invoice = serializers.CharField(required=False, allow_blank=True, allow_null=True)  # NEW: Add import_invoice field
+    equipment_type = serializers.CharField(required=False, allow_blank=True, allow_null=True)
+    external_radio_serial = serializers.CharField(required=False, allow_blank=True, allow_null=True)
 
     class Meta:
         model = SaleItem
         fields = [
             'id', 'tool_id', 'equipment', 'cost', 'category', 
             'serial_number', 'serial_set', 'datalogger_serial', 
-            'invoice_number', 'assigned_tool_id', 'import_invoice'  # NEW: Added import_invoice
+            'invoice_number', 'assigned_tool_id', 'import_invoice',
+            'equipment_type',          # ✅ ADD THIS
+            'external_radio_serial'  # NEW: Added import_invoice
         ]
         read_only_fields = ['id']
 
@@ -169,7 +173,7 @@ class SaleSerializer(serializers.ModelSerializer):
             "payment_status",
             "import_invoice",
         ]
-        read_only_fields = ["staff", "sold_by", "date_sold", "invoice_number", "payment_status"]
+        read_only_fields = ["staff", "sold_by", "date_sold", "invoice_number"]
 
     def validate(self, data):
         """
@@ -213,28 +217,35 @@ class SaleSerializer(serializers.ModelSerializer):
         
         # Create sale items
         for item_data in items_data:
-            # Extract frontend-specific fields
+            # 1. Pop the fields out so Django doesn't crash
             serial_set = item_data.pop('serial_set', None)
             datalogger_serial = item_data.pop('datalogger_serial', None)
             assigned_tool_id = item_data.pop('assigned_tool_id', None)
             invoice_number = item_data.pop('invoice_number', None)
             import_invoice = item_data.pop('import_invoice', None)
             
-            # Handle serial_set - convert to serial_number
+            # 2. Format the array of receivers safely
             if serial_set and isinstance(serial_set, list):
                 if len(serial_set) == 1:
                     item_data['serial_number'] = serial_set[0]
                 else:
                     item_data['serial_number'] = json.dumps(serial_set)
             
-            # Store assigned_tool_id
+            # 3. PUT THE POPPED FIELDS BACK IN BEFORE SAVING
             if assigned_tool_id:
                 item_data['assigned_tool_id'] = assigned_tool_id
             
-            # Store import_invoice in sale item
             if import_invoice:
                 item_data['import_invoice'] = import_invoice
+                
+            # THIS PERMANENTLY SAVES THE DATALOGGER TO THE DATABASE
+            if datalogger_serial:
+                item_data['datalogger_serial'] = datalogger_serial
+                
+            if invoice_number:
+                item_data['invoice_number'] = invoice_number
             
+            # 4. Save to database (Make sure this line only exists ONE TIME!)
             SaleItem.objects.create(sale=sale, **item_data)
             
         return sale
@@ -293,12 +304,15 @@ class PaymentSerializer(serializers.ModelSerializer):
         queryset=Sale.objects.all(), required=False, allow_null=True
     )
 
+    items = serializers.SerializerMethodField()
+
     class Meta:
         model = Payment
         fields = [
             "id",
             "customer",
             "sale",
+            "items",
             "amount",
             "payment_method",
             "payment_reference",
@@ -306,6 +320,13 @@ class PaymentSerializer(serializers.ModelSerializer):
             "status",
         ]
         read_only_fields = ["customer", "payment_date", "status"]
+
+    def get_items(self, obj):
+        if obj.sale:
+            # This returns a list of dictionaries like: 
+            # [{"equipment": "T20", "equipment_type": "Receiver"}, {"equipment": "External POLE", "equipment_type": "Accessory"}]
+            return list(obj.sale.items.values('equipment', 'equipment_type'))
+        return []
 
     def create(self, validated_data):
         user = self.context["request"].user
@@ -330,13 +351,14 @@ class CodeBatchSerializer(serializers.ModelSerializer):
 class ActivationCodeSerializer(serializers.ModelSerializer):
     batch_number = serializers.CharField(source='batch.batch_number', read_only=True)
     customer_name = serializers.CharField(source='customer.name', read_only=True)
+    qr_code_image = serializers.CharField(required=False, allow_null=True, allow_blank=True)
     is_expired = serializers.BooleanField(read_only=True)
     is_active = serializers.BooleanField(read_only=True)
     
     class Meta:
         model = ActivationCode
         fields = '__all__'
-        read_only_fields = ['created_at', 'updated_at']
+        read_only_fields = ['created_at', 'updated_at','qr_code_image']
 
 
 

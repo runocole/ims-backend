@@ -1,13 +1,13 @@
 from django.urls import path
 from .views import (
-    EmailLoginView, AddStaffView, StaffListView,
+    EmailLoginView, AddStaffView, PaymentSummaryView, SaveReceiverCodeView, StaffListView,ReceiverCodeManagementView,
     ToolListCreateView, ToolDetailView, EquipmentTypeListView, EquipmentTypeDetailView,
-    SaleListCreateView, SaleDetailView,
-    PaymentListCreateView, PaymentDetailView,
+    SaleListCreateView, SaleDetailView,CodeBatchListCreateView,CodeBatchItemsView,
+    PaymentListCreateView, PaymentDetailView,CodeBatchUploadCSVView,CodeBatchDownloadCSVView,
     DashboardSummaryView, AddCustomerView, CustomerListView, send_sale_email, 
     SupplierListView, SupplierDetailView, equipment_by_invoice,
     ToolGetRandomSerialView, ToolSoldSerialsView,  ToolGroupedListView, ToolAssignRandomFromGroupView, CustomerOwingDataView, ImportCodesView,
-    AssignCodeView, CustomerCodesView, GenerateEmergencyCodeView, AvailableCodesView, ReceiversNeedingCodesView,
+    AssignCodeView, CustomerCodesView, GenerateEmergencyCodeView, AvailableCodesView, ReceiversNeedingCodesView,SendBulkExpirationEmailsView
 )
 urlpatterns = [
     # --- Auth ---
@@ -26,6 +26,7 @@ urlpatterns = [
     path("tools/assign-random/", ToolAssignRandomFromGroupView.as_view(), name="tool-assign-random"),
     path("tools/<uuid:pk>/get-random-serial/", ToolGetRandomSerialView.as_view(), name="tool-get-random-serial"),
     path("tools/<uuid:pk>/sold-serials/", ToolSoldSerialsView.as_view(), name="tool-sold-serials"),
+    path('code-batches/<int:pk>/send-expiration-emails/', SendBulkExpirationEmailsView.as_view(), name='send-bulk-emails'),
   
     
     # Equipment Type
@@ -43,6 +44,7 @@ urlpatterns = [
     # Payments
     path('payments/', PaymentListCreateView.as_view(), name='payments'),
     path('payments/<int:pk>/', PaymentDetailView.as_view(), name='payment-detail'),
+    path("payments/summary/", PaymentSummaryView.as_view(), name="payment-summary"),
     
     # Suppliers
     path('suppliers/', SupplierListView.as_view(), name='suppliers'),
@@ -52,10 +54,16 @@ urlpatterns = [
     path('dashboard/summary/', DashboardSummaryView.as_view(), name='dashboard-summary'),
 
     # Code management URLs
-    path('api/codes/import/', ImportCodesView.as_view(), name='import-codes'),
-    path('api/codes/assign/', AssignCodeView.as_view(), name='assign-code'),
-    path('api/codes/customer/', CustomerCodesView.as_view(), name='customer-codes'),
-    path('api/codes/emergency/', GenerateEmergencyCodeView.as_view(), name='emergency-code'),
-    path('api/codes/available/', AvailableCodesView.as_view(), name='available-codes'),
-    path('api/codes/needing-codes/', ReceiversNeedingCodesView.as_view(), name='needing-codes'),
+    path('codes/import/', ImportCodesView.as_view(), name='import-codes'),
+    path('codes/assign/', AssignCodeView.as_view(), name='assign-code'),
+    path('codes/customer/', CustomerCodesView.as_view(), name='customer-codes'),
+    path('codes/emergency/', GenerateEmergencyCodeView.as_view(), name='emergency-code'),
+    path('codes/available/', AvailableCodesView.as_view(), name='available-codes'),
+    path('codes/needing-codes/', ReceiversNeedingCodesView.as_view(), name='needing-codes'),
+    path('codes/management/', ReceiverCodeManagementView.as_view(), name='code-management'),
+    path('codes/management/save/', SaveReceiverCodeView.as_view(), name='save-code'),
+    path("code-batches/",CodeBatchListCreateView.as_view(),name="code-batch-list-create"),
+    path("code-batches/<int:pk>/upload-csv/",CodeBatchUploadCSVView.as_view(),name="code-batch-upload-csv"),
+    path("code-batches/<int:pk>/download-csv/",CodeBatchDownloadCSVView.as_view(),name="code-batch-download-csv"),
+    path("code-batches/<int:pk>/items/", CodeBatchItemsView.as_view(), name="code-batch-items"),
 ]
